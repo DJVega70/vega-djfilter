@@ -1,0 +1,75 @@
+name: Build Vega Productions DJ Filter
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+jobs:
+  windows:
+    name: Windows VST3
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Vega Productions DJ Filter
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DVEGA_TESTS=ON
+      - name: Build Vega Productions DJ Filter
+        run: cmake --build build --config Release --target VegaDJFilter_VST3 VegaDJFilterTest
+      - name: DJ Filter self-test
+        run: build\VegaDJFilterTest_artefacts\Release\VegaDJFilterTest.exe
+      - name: Package Vega Productions DJ Filter
+        shell: pwsh
+        run: Compress-Archive -Path "build/VegaDJFilter_artefacts/Release/VST3/Vega Productions DJ Filter.vst3" -DestinationPath VegaProductions-DJFilter-VST3-win64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VegaProductions-DJFilter-Windows-VST3
+          path: VegaProductions-DJFilter-VST3-win64.zip
+
+  macos:
+    name: macOS VST3 + AU (Universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Vega Productions DJ Filter
+        run: cmake -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Build Vega Productions DJ Filter
+        run: cmake --build build --config Release --target VegaDJFilter_VST3 VegaDJFilter_AU --parallel
+      - name: Sign and package Vega Productions DJ Filter
+        run: |
+          codesign --force --deep -s - "build/VegaDJFilter_artefacts/Release/VST3/Vega Productions DJ Filter.vst3"
+          codesign --force --deep -s - "build/VegaDJFilter_artefacts/Release/AU/Vega Productions DJ Filter.component"
+          mkdir -p dist-VegaDJFilter
+          cp -R "build/VegaDJFilter_artefacts/Release/VST3/Vega Productions DJ Filter.vst3" "build/VegaDJFilter_artefacts/Release/AU/Vega Productions DJ Filter.component" dist-VegaDJFilter/
+          cd dist-VegaDJFilter && zip -r -y ../VegaProductions-DJFilter-macOS.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VegaProductions-DJFilter-macOS-VST3-AU
+          path: VegaProductions-DJFilter-macOS.zip
+
+  release:
+    name: Publish release
+    needs: [windows, macos]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Zip each plugin
+        run: |
+          cd dist
+          for d in */; do
+            d="${d%/}"
+            inner=$(ls "$d"/*.zip 2>/dev/null | head -1)
+            if [ -n "$inner" ] && [ "$(ls -A "$d" | wc -l)" -eq 1 ]; then mv "$inner" "$d.zip"; else (cd "$d" && zip -r -y "../$d.zip" .); fi
+          done
+          ls -la *.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Vega Productions - build ${{ github.run_number }}
+          make_latest: true
+          body: |
+            Download the **Windows-VST3** zip for FL Studio on Windows, or the **macOS-VST3-AU** zip for your Mac.
+            Unzip, then copy the `.vst3` to `C:\Program Files\Common Files\VST3\` (Windows) or `~/Library/Audio/Plug-Ins/VST3/` (Mac).
+          files: dist/*.zip
