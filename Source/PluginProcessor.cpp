@@ -3,13 +3,21 @@
 
 namespace
 {
-enum { kFilter, kRes, kSlope, kDrive, kLfoDepth, kLfoRate, kNoise, kRepeat, kRepLen, kGate, kGateRate, kGateDepth, kEcho, kEchoTime, kEchoFb, kBrake, kBrakeStyle, kBrakeTime, kOut };
-const char* ids[] = { "filter", "resonance", "slope", "drive", "lfoDepth", "lfoRate", "noise", "repeat", "repeatLen", "gate", "gateRate", "gateDepth", "echoOut", "echoTime", "echoFeedback", "brake", "brakeStyle", "brakeTime", "output" };
-constexpr int numP = 19;
+enum { kFilter, kRes, kSlope, kDrive, kLfoDepth, kLfoRate, kNoise, kRepeat, kRepLen, kGate, kGateRate, kGateDepth, kEcho, kEchoBeat, kEchoFb, kBrake, kBrakeStyle, kBrakeTime, kOut, kEchoSync, kEchoMs, kEchoLevel };
+const char* ids[] = { "filter", "resonance", "slope", "drive", "lfoDepth", "lfoRate", "noise", "repeat", "repeatLen", "gate", "gateRate", "gateDepth", "echoOut", "echoBeat", "echoFeedback", "brake", "brakeStyle", "brakeTime", "output", "echoSync", "echoMs", "echoLevel" };
+constexpr int numP = 22;
 }
 
 juce::StringArray VegaDJFilterProcessor::divNames() { return { "1/32", "1/16", "1/8T", "1/8", "1/8D", "1/4", "1/2", "1 Bar" }; }
 double VegaDJFilterProcessor::divBeats (int i) { static const double b[] { 0.125, 0.25, 1.0 / 3, 0.5, 0.75, 1, 2, 4 }; return b[juce::jlimit (0, 7, i)]; }
+
+// Pioneer DJM / DDJ beat values for ECHO: 1/16 .. 16 beats
+juce::StringArray VegaDJFilterProcessor::echoBeatNames() { return { "1/16", "1/8", "1/4", "1/2", "3/4", "1", "2", "4", "8", "16" }; }
+double VegaDJFilterProcessor::echoBeats (int i) { static const double b[] { 0.0625, 0.125, 0.25, 0.5, 0.75, 1, 2, 4, 8, 16 }; return b[juce::jlimit (0, 9, i)]; }
+double VegaDJFilterProcessor::echoDelaySamples (bool sync, int beatIdx, float ms, double bpm, double rate)
+{
+    return sync ? echoBeats (beatIdx) * rate * 60.0 / bpm : ms * 0.001 * rate;
+}
 
 void VegaDJFilterProcessor::mapKnob (float pos, int& mode, float& cutoff, float& wet)
 {
@@ -40,10 +48,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout VegaDJFilterProcessor::layou
     F (kNoise, "Riser Noise", NormalisableRange<float> (0, 100), 0, pct);
     B (kRepeat, "Beat Repeat"); C (kRepLen, "Repeat Length", divNames(), 1);
     B (kGate, "Gate"); C (kGateRate, "Gate Rate", divNames(), 1); F (kGateDepth, "Gate Depth", NormalisableRange<float> (0, 100), 100, pct);
-    B (kEcho, "Echo Out"); C (kEchoTime, "Echo Time", divNames(), 4); F (kEchoFb, "Echo Feedback", NormalisableRange<float> (0, 95), 65, pct);
+    B (kEcho, "Echo"); C (kEchoBeat, "Echo Beat", echoBeatNames(), 5); F (kEchoFb, "Echo Feedback", NormalisableRange<float> (0, 95), 55, pct);
     B (kBrake, "Stop"); C (kBrakeStyle, "Stop Style", { "Vinyl Stop", "Spinback", "Tape Stop" }, 0);
     F (kBrakeTime, "Stop Time", NormalisableRange<float> (0.1f, 4.0f, 0, 0.5f), 1.0f, [] (float x, int) { return String (x, 2) + " s"; });
     F (kOut, "Output", NormalisableRange<float> (-24, 12), 0, [] (float x, int) { return String (x, 1) + " dB"; });
+    v.push_back (std::make_unique<AudioParameterBool> (ParameterID { ids[kEchoSync], 1 }, "Echo Sync", true));
+    F (kEchoMs, "Echo Time", NormalisableRange<float> (1, 4000, 0, 0.4f), 500, [] (float x, int) { return String (roundToInt (x)) + " ms"; });
+    F (kEchoLevel, "Echo Level/Depth", NormalisableRange<float> (0, 100), 60, pct);
     return { v.begin(), v.end() };
 }
 
@@ -64,12 +75,16 @@ void VegaDJFilterProcessor::prepareToPlay (double s, int)
 {
     sr = s;
     for (auto& r : ring) r.assign ((size_t) (s * 8.5), 0.0f);
-    for (auto& e : echo) e.assign ((size_t) (s * 4.5), 0.0f);
+    for (auto& e : echo) e.assign ((size_t) (s * 17.0), 0.0f);   // 16 beats at 60 BPM
     wpos = ewpos = 0;
     for (auto& a : svf) for (auto& f : a) f.reset();
     posS.reset (s, 0.04); posS.setCurrentAndTargetValue (p[kFilter]->load() * 0.01f);
     resS.reset (s, 0.04); resS.setCurrentAndTargetValue (p[kRes]->load() * 0.01f);
-    repeatWas = brakeWas = false; dryGain = 1; echoIn = 0; gateEnv = 1; brakeFade = 0;
+    repeatWas = brakeWas = false; echoIn = 0; gateEnv = 1; brakeFade = 0;
+    echoCur = echoPrev = 0; echoXf = 1;
+    for (int c = 0; c < 2; ++c) fbLp[c] = fbHp[c] = fbHpIn[c] = 0;
+    echoWetS.reset (s, 0.03); echoWetS.setCurrentAndTargetValue (p[kEchoLevel]->load() * 0.01f);
+    echoFbS.reset (s, 0.03); echoFbS.setCurrentAndTargetValue (p[kEchoFb]->load() * 0.01f);
 }
 
 float VegaDJFilterProcessor::readRing (int c, double pos) const
@@ -100,8 +115,15 @@ void VegaDJFilterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     const float lfoDepth = p[kLfoDepth]->load() * 0.01f; const double lfoInc = 1.0 / (divBeats ((int) p[kLfoRate]->load()) * spb);
     const float noise = p[kNoise]->load() * 0.01f;
     const double gateBeats = divBeats ((int) p[kGateRate]->load()); const float gateDepth = p[kGateDepth]->load() * 0.01f;
-    const int echoLen = juce::jlimit (16, en - 4, (int) (divBeats ((int) p[kEchoTime]->load()) * spb));
-    const float echoFb = p[kEchoFb]->load() * 0.01f;
+    const bool echoSync = p[kEchoSync]->load() > 0.5f;
+    const double echoD = echoDelaySamples (echoSync, (int) p[kEchoBeat]->load(), p[kEchoMs]->load(), bpm, sr);
+    const int echoTarget = juce::jlimit (16, en - 4, (int) std::lround (echoD));
+    uiEchoMs.store ((float) (echoTarget * 1000.0 / sr));
+    echoWetS.setTargetValue (p[kEchoLevel]->load() * 0.01f); echoFbS.setTargetValue (p[kEchoFb]->load() * 0.01f);
+    if (echoCur == 0) echoCur = echoPrev = echoTarget;
+    // feedback-loop tone: repeats lose a little top and bottom each pass, like the Pioneer echo
+    const float lpA = 1.0f - std::exp (-juce::MathConstants<float>::twoPi * 7500.0f / (float) sr);
+    const float hpA = std::exp (-juce::MathConstants<float>::twoPi * 110.0f / (float) sr);
     const int brakeStyle = (int) p[kBrakeStyle]->load(); const double brakeTime = p[kBrakeTime]->load();
     const float outG = juce::Decibels::decibelsToGain (p[kOut]->load());
     posS.setTargetValue (p[kFilter]->load() * 0.01f); resS.setTargetValue (p[kRes]->load() * 0.01f);
@@ -186,17 +208,25 @@ void VegaDJFilterProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         }
         else gateEnv += (1.0f - gateEnv) * 0.02f;
 
-        // ---- echo out: dry fades, echoes keep going
-        dryGain += ((echoOn ? 0.0f : 1.0f) - dryGain) * (float) (1.0 / (0.04 * sr));
-        echoIn = echoOn ? std::min (1.0f, echoIn + (float) (1.0 / (0.005 * sr))) : std::max (0.0f, echoIn - (float) (1.0 / (0.02 * sr)));
-        int rp = ewpos - echoLen; if (rp < 0) rp += en;
+        // ---- echo: dry always passes; input is sent to the delay only while ECHO is on,
+        //      so switching off leaves the repeats trailing out in time (Pioneer "trail")
+        echoIn = echoOn ? std::min (1.0f, echoIn + (float) (1.0 / (0.003 * sr))) : std::max (0.0f, echoIn - (float) (1.0 / (0.008 * sr)));
+        if (echoXf >= 1.0f && echoTarget != echoCur) { echoPrev = echoCur; echoCur = echoTarget; echoXf = 0; }   // time change -> crossfade taps
+        const float wetG = echoWetS.getNextValue(), fbG = echoFbS.getNextValue();
+        int rpA = ewpos - echoCur;  if (rpA < 0) rpA += en;
+        int rpB = ewpos - echoPrev; if (rpB < 0) rpB += en;
+        const float xf = echoXf;
+        if (echoXf < 1.0f) echoXf = std::min (1.0f, echoXf + (float) (1.0 / (0.04 * sr)));
         for (int c = 0; c < 2; ++c)
         {
-            const float e = echo[c][(size_t) rp];
-            const float other = echo[1 - c][(size_t) rp];
-            const float feed = (x[c] * dryGain) * echoIn * (dryGain > 0.02f ? 1.0f : 0.0f) + (0.7f * e + 0.3f * other) * echoFb;
-            echo[c][(size_t) ewpos] = std::tanh (feed);
-            x[c] = x[c] * dryGain + e;
+            const float e = xf >= 1.0f ? echo[c][(size_t) rpA] : echo[c][(size_t) rpA] * xf + echo[c][(size_t) rpB] * (1.0f - xf);
+            // tone the feedback: gentle low-pass + high-pass
+            fbLp[c] += lpA * (e - fbLp[c]);
+            fbHp[c] = hpA * (fbHp[c] + fbLp[c] - fbHpIn[c]); fbHpIn[c] = fbLp[c];
+            float w = x[c] * echoIn + fbHp[c] * fbG;
+            if (std::abs (w) > 0.8f) w = std::copysign (0.8f + 0.2f * std::tanh ((std::abs (w) - 0.8f) * 5.0f), w);   // only catches overloads
+            echo[c][(size_t) ewpos] = w;
+            x[c] += e * wetG;
         }
         if (++ewpos >= en) ewpos = 0;
         if (++wpos >= rn) wpos = 0;

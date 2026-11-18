@@ -102,22 +102,38 @@ public:
         filter (a, "filter", "FILTER", true), res (a, "resonance", "Resonance"), slope (a, "slope", "Slope"), drive (a, "drive", "Drive"),
         lfoDepth (a, "lfoDepth", "LFO Depth"), lfoRate (a, "lfoRate", "LFO Rate"), noise (a, "noise", "Riser Noise"), output (a, "output", "Output"),
         repLen (a, "repeatLen", "Length"), gateRate (a, "gateRate", "Rate"), gateDepth (a, "gateDepth", "Depth"),
-        echoTime (a, "echoTime", "Time"), echoFb (a, "echoFeedback", "Feedback"), brakeStyle (a, "brakeStyle", "Style"), brakeTime (a, "brakeTime", "Time"),
+        echoBeat (a, "echoBeat", "Beat"), echoMs (a, "echoMs", "Time"), echoLevel (a, "echoLevel", "Level/Depth"), echoFb (a, "echoFeedback", "Feedback"), brakeStyle (a, "brakeStyle", "Style"), brakeTime (a, "brakeTime", "Time"),
         repeatPad (a, "repeat", "BEAT REPEAT", "loops the last slice"), gatePad (a, "gate", "GATE", "trance chop"),
-        echoPad (a, "echoOut", "ECHO OUT", "dry out, echoes ring"), brakePad (a, "brake", "STOP", "vinyl / spinback / tape")
+        echoPad (a, "echoOut", "ECHO", "echoes trail out when off"), brakePad (a, "brake", "STOP", "vinyl / spinback / tape")
     {
         for (auto* c : std::initializer_list<juce::Component*> { &view, &filter, &res, &slope, &drive, &lfoDepth, &lfoRate, &noise, &output, &repLen, &gateRate, &gateDepth,
-                                                                 &echoTime, &echoFb, &brakeStyle, &brakeTime, &repeatPad, &gatePad, &echoPad, &brakePad, &meter })
+                                                                 &echoBeat, &echoMs, &echoLevel, &echoFb, &echoSync, &echoInfo, &brakeStyle, &brakeTime, &repeatPad, &gatePad, &echoPad, &brakePad, &meter })
             addAndMakeVisible (c);
         filter.slider.setMouseDragSensitivity (420);
         holdMode.setButtonText ("HOLD TO PLAY"); holdMode.setClickingTogglesState (true);
         holdMode.onClick = [this] { for (auto* pd : { &repeatPad, &gatePad, &echoPad, &brakePad }) { pd->momentary = holdMode.getToggleState(); pd->repaint(); } };
         addAndMakeVisible (holdMode);
+        echoSync.setButtonText ("SYNC"); echoSync.setClickingTogglesState (true);
+        echoSync.setColour (juce::TextButton::buttonOnColourId, VegaColours::accent.withAlpha (0.85f));
+        echoSync.setColour (juce::TextButton::textColourOnId, juce::Colours::black);
+        echoSync.setTooltip ("SYNC on: echo time follows the track tempo in beats. Off: set it freely in milliseconds.");
+        syncAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (a, "echoSync", echoSync);
+        echoSync.onStateChange = [this] { updateEchoMode(); };
+        echoInfo.setFont (VegaFonts::mono (11.0f)); echoInfo.setJustificationType (juce::Justification::centred);
+        echoInfo.setColour (juce::Label::textColourId, VegaColours::accent);
+        updateEchoMode();
+    }
+    void updateEchoMode()
+    {
+        const bool sync = echoSync.getToggleState();
+        echoBeat.setVisible (sync); echoMs.setVisible (! sync);
     }
     void refresh()
     {
         view.repaint();
         meter.setLevels (proc.outL.exchange (0.0f), proc.outR.exchange (0.0f));
+        const juce::String t = juce::String (juce::roundToInt (proc.uiEchoMs.load())) + " ms" + (echoSync.getToggleState() ? "  @ " + juce::String (proc.bpm, 1) + " BPM" : juce::String ("  FREE"));
+        if (echoInfo.getText() != t) echoInfo.setText (t, juce::dontSendNotification);
     }
     void paint (juce::Graphics& g) override
     {
@@ -131,7 +147,7 @@ public:
         g.setColour (VegaColours::line); g.drawHorizontalLine (348, 0, (float) W);
         vegaui::drawSection (g, { 0, 352, 250, 218 }, "BEAT REPEAT", false);
         vegaui::drawSection (g, { 250, 352, 250, 218 }, "GATE");
-        vegaui::drawSection (g, { 500, 352, 250, 218 }, "ECHO OUT");
+        vegaui::drawSection (g, { 500, 352, 250, 218 }, "ECHO");
         vegaui::drawSection (g, { 750, 352, 250, 218 }, "STOP");
         vegaui::drawBottomBar (g, { 0, H - 30, W, 30 }, "LEFT = LOW-PASS   CENTRE = OFF   RIGHT = HIGH-PASS   -   PADS ARE AUTOMATABLE IN FL STUDIO");
     }
@@ -149,16 +165,22 @@ public:
         };
         padRow (repeatPad, 0, repLen, dummy);
         padRow (gatePad, 250, gateRate, gateDepth);
-        padRow (echoPad, 500, echoTime, echoFb);
+        echoPad.setBounds (514, 372, 222, 66);
+        echoInfo.setBounds (514, 440, 222, 14);
+        echoSync.setBounds (512, 460, 70, 24);
+        echoBeat.setBounds (508, 490, 80, 46); echoMs.setBounds (508, 486, 80, 82);
+        echoLevel.setBounds (590, 458, 76, 104); echoFb.setBounds (666, 458, 76, 104);
         padRow (brakePad, 750, brakeStyle, brakeTime);
     }
 private:
     VegaDJFilterProcessor& proc; juce::AudioProcessorValueTreeState& a;
     FilterView view;
     vegaui::Knob filter, res; vegaui::Choice slope; vegaui::Knob drive, lfoDepth; vegaui::Choice lfoRate; vegaui::Knob noise, output;
-    vegaui::Choice repLen, gateRate; vegaui::Knob gateDepth; vegaui::Choice echoTime; vegaui::Knob echoFb; vegaui::Choice brakeStyle; vegaui::Knob brakeTime;
+    vegaui::Choice repLen, gateRate; vegaui::Knob gateDepth; vegaui::Choice echoBeat; vegaui::Knob echoMs, echoLevel, echoFb; vegaui::Choice brakeStyle; vegaui::Knob brakeTime;
     FxPad repeatPad, gatePad, echoPad, brakePad;
     juce::TextButton holdMode; juce::Component dummy;
+    juce::TextButton echoSync; juce::Label echoInfo;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> syncAttach;
     vegaui::StereoMeter meter;
 };
 

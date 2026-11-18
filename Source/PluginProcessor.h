@@ -30,7 +30,7 @@ public:
     const juce::String getName() const override { return "Vega Productions DJ Filter"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
-    double getTailLengthSeconds() const override { return 4.0; }
+    double getTailLengthSeconds() const override { return 12.0; }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
@@ -42,6 +42,10 @@ public:
     static juce::AudioProcessorValueTreeState::ParameterLayout layout();
     static juce::StringArray divNames();
     static double divBeats (int);
+    static juce::StringArray echoBeatNames();
+    static double echoBeats (int);
+    // echo delay in samples for the current settings (sync -> beats at bpm, else ms)
+    static double echoDelaySamples (bool sync, int beatIdx, float ms, double bpm, double sr);
     juce::AudioProcessorValueTreeState apvts;
 
     // knob position (-1..1) -> filter mode and cutoff; |pos| < dead = bypass
@@ -49,7 +53,7 @@ public:
 
     std::atomic<float> uiPos { 0 }, uiCutoff { 1000 }, outL { 0 }, outR { 0 }, uiBrake { 1 };
     std::atomic<int> uiMode { -1 };
-    std::atomic<float> uiScale { 1.0f };
+    std::atomic<float> uiScale { 1.0f }, uiEchoMs { 500 };
     double bpm = 120;
 
 private:
@@ -60,13 +64,16 @@ private:
     bool repeatWas = false; int repStart = 0, repLen = 1, repPos = 0;
     // brake / spinback
     bool brakeWas = false; double brakeRead = 0, brakeSpeed = 1, brakeT = 0; float brakeFade = 0;
-    // echo out
-    std::vector<float> echo[2]; int ewpos = 0; float dryGain = 1, echoIn = 0;
+    // echo (Pioneer-style: dry stays, echoes trail out after switching off)
+    std::vector<float> echo[2]; int ewpos = 0; float echoIn = 0;
+    int echoCur = 0, echoPrev = 0; float echoXf = 1;
+    float fbLp[2] {}, fbHp[2] {}, fbHpIn[2] {};
+    juce::SmoothedValue<float> echoWetS, echoFbS;
     // gate / lfo
     double lfoPhase = 0, gatePhase = 0; float gateEnv = 1;
     juce::SmoothedValue<float> posS, resS;
     float noiseLp = 0; juce::Random rng;
     float readRing (int c, double pos) const;
-    std::atomic<float>* p[20] {};
+    std::atomic<float>* p[24] {};
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VegaDJFilterProcessor)
 };
