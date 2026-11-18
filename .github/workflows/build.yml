@@ -47,7 +47,7 @@ jobs:
   release:
     name: Publish release
     needs: [windows, macos]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.windows.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
